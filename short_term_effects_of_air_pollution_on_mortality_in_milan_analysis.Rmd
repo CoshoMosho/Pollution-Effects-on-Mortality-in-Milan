@@ -1,0 +1,189 @@
+---
+title: "Short-term effects of air pollution on mortality in Milan"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Introduction
+
+This report presents an exploratory analysis of daily mortality and air pollution data for the city of Milan, Italy, covering a period of ten consecutive years from **January 1, 1980 to December 30, 1989** (3,652 days).
+
+The dataset includes daily measurements of total mortality, meteorological variables, and air pollution indicators, in particular **sulfur dioxide (SO₂)** and **total suspended particulates (TSP)**. Calendar-related covariates such as **day of the week** and **public holidays** are also available, allowing adjustment for short-term temporal patterns.
+
+The main objective of this analysis is to explore the short-term association between air pollution and mortality. The analysis focuses on data cleaning, variable transformation, exploratory visualization, and descriptive statistics, which form the basis for subsequent modeling.
+
+The data were originally analyzed in:
+
+> Vigotti, M.A., Rossi, G., Bisanti, L., Zanobetti, A., and Schwartz, J. (1996). *Short term effect of urban air pollution on respiratory health in Milan, Italy, 1980–1989*. **Journal of Epidemiology and Community Health**, 50, S71–S75.
+
+The dataset is also documented in:
+
+> Ruppert, D., Wand, M.P., and Carroll, R.J. (2003). *Semiparametric Regression*. Cambridge University Press.
+
+## 1. Libraries and data loading
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(lme4)
+library(performance)
+library(MASS)
+```
+
+```{r}
+filePath <- "C:/Users/mavip/Desktop"
+setwd(filePath)
+
+df <- read.table("mil.txt", header = TRUE, sep = "")
+```
+
+```{r}
+count(df)
+str(df)
+head(df)
+tail(df)
+```
+
+## 2. Recoding of categorical variables
+
+```{r}
+df$day.of.week <- factor(
+  df$day.of.week,
+  levels = 1:7,
+  labels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+)
+
+df$holiday <- factor(
+  df$holiday,
+  levels = 0:1,
+  labels = c("No holiday", "Holiday")
+)
+```
+
+## 3. Data cleaning
+
+```{r}
+df <- df %>% filter(SO2 > 0, TSP > 0)
+```
+
+```{r}
+df <- df %>%
+  mutate(
+    date  = as.Date(day.num, origin = "1980-01-01"),
+    year  = year(date),
+    month = month(date),
+    season = factor(
+      case_when(
+        month %in% 3:5  ~ "Spring",
+        month %in% 6:8  ~ "Summer",
+        month %in% 9:11 ~ "Autumn",
+        TRUE            ~ "Winter"
+      ),
+      levels = c("Winter", "Spring", "Summer", "Autumn")
+    ),
+    log_SO2 = signif(log(SO2), digits = 5),
+    log_TSP = signif(log(TSP), digits = 5)
+  )
+```
+
+```{r}
+count(df)
+head(df)
+table(df$season)
+summary(df$log_SO2)
+summary(df$log_TSP)
+```
+
+## 4. Outlier analysis
+
+```{r}
+boxplot(df[, c("tot.mort", "log_SO2", "log_TSP", "mean.temp", "rel.humid")],
+        main = "Boxplot of the main variables")
+```
+
+## 5. Exploratory relationships
+
+```{r, fig.width=10, fig.height=6}
+par(mfrow = c(2,4))
+
+# With pollutants there seems to be a slight correlation
+plot(df$SO2, df$tot.mort, main = "SO2 vs Mortality", 
+     xlab = "SO2", ylab = "Total mortality")
+
+# With pollutants there seems to be a slight correlation
+plot(df$TSP, df$tot.mort, main = "TSP vs Mortality",
+     xlab = "TSP", ylab = "Total mortality")
+
+# Temperature–mortality shows a U/J-shaped relationship
+plot(df$mean.temp, df$tot.mort, main = "Temperature vs Mortality",
+     xlab = "Mean temperature", ylab = "Total mortality")
+
+plot(df$rel.humid, df$tot.mort, main = "Humidity vs Mortality",
+     xlab = "Relative humidity", ylab = "Total mortality")
+
+# With pollutants there seems to be a slight correlation
+plot(df$log_SO2, df$tot.mort, main = "log(SO2) vs Mortality",
+     xlab = "log(SO2)", ylab = "Total mortality")
+
+# With pollutants there seems to be a slight correlation
+plot(df$log_TSP, df$tot.mort, main = "log(TSP) vs Mortality",
+     xlab = "log(TSP)", ylab = "Total mortality")
+
+# There are evident annual cycles in mortality
+plot(df$day.num, df$tot.mort, main = "Daily index vs Mortality",
+     xlab = "Day index", ylab = "Total mortality")
+
+par(mfrow = c(1,1))
+```
+
+## 6. Descriptive statistics
+
+```{r}
+glimpse(df)
+summary(df[, c("tot.mort", "SO2", "TSP", "mean.temp", "rel.humid")])
+```
+
+**Observations from the exploratory relationships:**
+
+- **Temperature – Mortality**: A clear U- or J-shaped relationship is observed, with higher mortality at both very low and very high temperatures. This suggests that both extreme cold and extreme heat increase the risk of mortality.
+
+- **Pollutants (SO2 and TSP) – Mortality**: A slight positive correlation is observed between pollutant levels and mortality. The association appears more evident when using logarithmic transformations of the pollutants.
+
+## 7. Exploratory plots (ggplot2)
+
+```{r}
+p1 <- ggplot(df, aes(x = tot.mort)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7, color = "black") +
+  labs(title = "Distribution of mortality", 
+       x = "Total mortality", 
+       y = "Frequency")
+
+p2 <- ggplot(df, aes(x = day.num, y = tot.mort)) +
+  geom_line(alpha = 0.5) +
+  geom_smooth(color = "red", se = FALSE) +
+  labs(title = "", 
+       x = "Day", 
+       y = "Total mortality")
+
+p1
+p2
+```
+
+**Note**: The plot clearly highlights the annual cycles in mortality, with recurring peaks likely associated with winter months and adverse climatic conditions.
+
+## 8. Saving the cleaned dataset
+
+```{r}
+write.table(df, "df_clean.txt", sep = " ", row.names = FALSE, quote = FALSE)
+print("Cleaned dataset saved as 'df_clean.txt'")
+```

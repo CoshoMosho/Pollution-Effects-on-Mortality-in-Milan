@@ -1,0 +1,385 @@
+---
+title: "Bayesian Analysis of Pollution Effects on Mortality in Milan"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: united
+    code_folding: show
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = TRUE,
+  message = TRUE,
+  fig.width = 10,
+  fig.height = 6,
+  cache = FALSE
+)
+```
+
+# Libraries
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(brms)
+library(tidyverse)
+library(lubridate)
+library(bayesplot)
+library(performance)
+library(patchwork)
+library(posterior)
+
+theme_set(bayesplot::theme_default())
+```
+
+# Data Loading
+
+```{r data-loading}
+setwd("C:/Users/mavip/Desktop")
+d <- read.table("df_pulito.txt", header = TRUE)
+
+summary(d[, c("tot.mort", "mean.temp", "log_SO2", "log_TSP")])
+```
+
+# Variable Preparation
+
+```{r data-prep}
+d <- d %>%
+  mutate(
+    day.of.week = factor(day.of.week),
+    holiday = factor(holiday),
+    day.of.year = (day.num - 1) %% 365 + 1
+  )
+```
+
+# PPC Function
+
+```{r ppc-function}
+check_model <- function(model, dat, label) {
+  cat("\n=== Diagnostics for", label, "===\n\n")
+  
+  # 1. PPC: density
+  p1 <- pp_check(model, type = "dens_overlay", ndraws = 50) + 
+    ggtitle(paste(label, "- Observed vs predicted density"))
+  print(p1)
+  
+  # 2. PPC: key statistics
+  p2 <- pp_check(model, type = "stat", stat = "mean") + 
+    ggtitle(paste(label, "- Test: Mean"))
+  p3 <- pp_check(model, type = "stat", stat = "sd") + 
+    ggtitle(paste(label, "- Test: SD"))
+  print(p2 / p3)  # stack vertically with patchwork
+  
+  # 3. Residuals
+  resid <- residuals(model)[, "Estimate"]
+  
+  valid_idx <- !is.na(resid)
+  resid_clean <- resid[valid_idx]
+  time_clean <- dat$day.num[valid_idx]
+  
+  # Plot residuals over time
+  p4 <- ggplot(data.frame(time = time_clean, resid = resid_clean), 
+               aes(x = time, y = resid)) +
+    geom_point(alpha = 0.3) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+    geom_smooth(method = "loess", se = TRUE, color = "blue") +
+    labs(title = paste(label, "- Residuals over time"), 
+         x = "Day", y = "Residual")
+  
+  # 4. ACF 
+  acf_obj <- acf(resid_clean, plot = FALSE, lag.max = min(30, floor(length(resid_clean)/4)))
+  n_lags <- length(acf_obj$acf) - 1 
+  
+  acf_df <- data.frame(
+    lag = 1:n_lags, 
+    acf = acf_obj$acf[-1]
+  )
+  
+  ci <- 1.96/sqrt(length(resid_clean))
+  
+  p5 <- ggplot(acf_df, aes(x = lag, y = acf)) +
+    geom_hline(yintercept = 0) +
+    geom_segment(aes(xend = lag, yend = 0)) +
+    geom_hline(yintercept = c(-ci, ci), linetype = "dashed", color = "blue") +
+    labs(title = paste(label, "- Residual ACF"), 
+         x = "Lag (days)", y = "Autocorrelation")
+  
+  # Combine residuals and ACF
+  print(p4 / p5)
+  
+  cat("\n✓ Diagnostics completed for", label, "\n\n")
+}
+```
+
+# Model 0: Baseline Poisson
+
+```{r m0, results='hide'}
+m0 <- brm(
+  tot.mort ~ day.of.week + holiday +
+    sin(2 * 3.141592653589793 * day.num / 365) + 
+    cos(2 * 3.141592653589793 * day.num / 365),
+  data = d,
+  family = poisson(),
+  prior = c(
+    prior(normal(0, 5), class = "Intercept"),
+    prior(normal(0, 0.5), class = "b")
+  ),
+  chains = 4, cores = 4, iter = 3000, warmup = 1500,
+  control = list(adapt_delta = 0.95),
+  seed = 2025,
+  file = NULL
+)
+```
+
+```{r m0-results}
+print(summary(m0))
+check_model(m0, d, label = "m0")
+loo_m0 <- loo(m0)
+print(loo_m0)
+
+cat("\n=== INTERPRETATION M0 ===\n")
+
+```
+- This model only captures calendar patterns and very simple seasonality  
+- a negative-binomial seems more appropriate given the overdispersion 
+
+# Model 0-NB: Baseline Negative Binomial  
+
+```{r m0-nb, results='hide'}
+m0_nb <- brm(
+  tot.mort ~ day.of.week + holiday +
+    sin(2 * 3.141592653589793 * day.num / 365) + 
+    cos(2 * 3.141592653589793 * day.num / 365),
+  data = d,
+  family = negbinomial(),
+  prior = c(
+    prior(normal(0, 5), class = "Intercept"),
+    prior(normal(0, 0.5), class = "b"),
+    prior(gamma(2, 0.1), class = "shape")
+  ),
+  chains = 4, cores = 4, iter = 3000, warmup = 1500,
+  control = list(adapt_delta = 0.95),
+  seed = 2025,
+  file = NULL
+)
+```
+
+```{r m0-nb-results}
+print(summary(m0_nb))
+check_model(m0_nb, d, label = "m0_nb")
+loo_m0_nb <- loo(m0_nb)
+print(loo_m0_nb)
+
+cat("\n=== INTERPRETATION M0-NB ===\n")
+
+```
+
+INTERPRETATION M1 - Negative Binomial  
+overdispersion is present although moderate  
+elpd_loo confirms it, the negbin model is better 
+
+# Temperature Model
+
+```{r m-temp, results='hide'}
+m_temp <- brm(
+  tot.mort ~
+    s(day.num, bs = "tp", k = 20) +
+    s(day.of.year, bs = "cc", k = 20) +
+    day.of.week + holiday +
+    s(mean.temp, bs = "cr", k = 10),
+  data = d,
+  family = negbinomial(),
+  prior = prior(exponential(1), class = "sds"),
+  chains = 4, cores = 4, iter = 3000, warmup = 1500,
+  control = list(adapt_delta = 0.95),
+  file = NULL
+)
+```
+
+```{r m-temp-results}
+print(summary(m_temp))
+check_model(m_temp, d, label = "m_temp")
+loo_m_temp <- loo(m_temp)
+print(loo_m_temp)
+
+plot(conditional_effects(m_temp, "mean.temp"), points = FALSE)
+
+cat("\n=== INTERPRETATION M-TEMP ===\n")
+
+```
+
+Interpretation M2 - Temperature
+
+there is one "divergent transition" but Rhat ≈ 1.01
+Very high Shape, much observed dispersion with the new covariate  
+temperature adds substantial predictive value  
+yet the conditional effect of temperature shows apparent contradiction with the initial correlation graph. There are no evident effects of winter. (perhaps winter mortality depends on factors like viruses,..)
+Analyzing the ACF and residual graphs we notice that the model does not exactly capture long-period patterns especially in the initial part while there are autocorrelations, albeit decreasing, in the short-medium period.
+
+# Pollution Linear Model
+
+```{r m-poll-linear, results='hide'}
+m_poll_linear <- brm(
+  tot.mort ~
+    s(day.num, bs = "tp", k = 20) +
+    s(day.of.year, bs = "cc", k = 20) +
+    day.of.week + holiday +
+    s(mean.temp, bs = "cr", k = 10) +
+    log_SO2 + log_TSP,
+  data = d,
+  family = negbinomial(),
+  prior = c(
+    prior(normal(0, 0.3), class = "b", coef = "log_SO2"),
+    prior(normal(0, 0.3), class = "b", coef = "log_TSP"),
+    prior(exponential(1), class = "sds")
+  ),
+  chains = 4, cores = 4, iter = 3500, warmup = 1750,
+  control = list(adapt_delta = 0.97),
+  file = NULL
+)
+```
+
+```{r m-poll-linear-results}
+print(summary(m_poll_linear))
+check_model(m_poll_linear, d, label = "m_poll_linear")
+loo_m_poll_linear <- loo(m_poll_linear)
+print(loo_m_poll_linear)
+
+cat("\n=== INTERPRETATION M-POLL-LINEAR ===\n")
+```
+Interpretation - Pollutants  
+the addition of SO2 pollutant does not seem to have relevant effects  
+
+the effect of TSP seems to be of little relevance
+
+# Full Model
+
+```{r m-full, results='hide'}
+m_full <- brm(
+  tot.mort ~
+    s(day.num, bs = "tp", k = 20) +
+    s(day.of.year, bs = "cc", k = 20) +
+    day.of.week + holiday +
+    s(mean.temp, bs = "cr", k = 10) +
+    s(log_SO2, bs = "cr", k = 6) +
+    s(log_TSP, bs = "cr", k = 6),
+  data = d,
+  family = negbinomial(),
+  prior = c(
+    prior(exponential(1.5), class = "sds"),
+    prior(normal(0, 0.5), class = "b")
+  ),
+  chains = 4, cores = 4, iter = 5000, warmup = 2500,
+  control = list(adapt_delta = 0.99, max_treedepth = 13),
+  seed = 2025,
+  file = NULL
+)
+```
+
+```{r m-full-results}
+print(summary(m_full))
+check_model(m_full, d, label = "m_full")
+loo_m_full <- loo(m_full)
+print(loo_m_full)
+```
+
+there seem to be significant divergence issues for sampling  
+
+
+# Model Comparison
+
+```{r model-comparison}
+cat("\n========================================\n")
+cat("   MODEL COMPARISON (LOO-CV)\n")
+cat("========================================\n\n")
+
+loo_comparison <- loo_compare(loo_m0_nb, loo_m_temp, loo_m_poll_linear, loo_m_full)
+print(loo_comparison)
+
+cat("\n=== MODEL COMPARISON INTERPRETATION ===\n\n")
+```
+# MODEL COMPARISON INTERPRETATION
+
+
+1. m0_nb vs m_temp (difference -380.7)
+- **m0_nb** uses rigid seasonality (sin/cos) and DOES NOT include temperature
+- **m_temp** uses flexible splines for seasonality AND includes temperature
+- Huge difference → temperature and seasonality are **FUNDAMENTAL**
+- Mortality has a strong seasonal and climatic component
+
+### 2. m_temp vs m_poll_linear vs m_full (differences < 2)
+- All three are statistically **EQUIVALENT** (|elpd_diff| < 2×SE)
+- Adding pollutants improves prediction only by ~1 point
+- The effects of SO₂ and TSP are **SMALL** compared to temperature
+
+### 3. m_poll_linear vs m_full
+- Linear and non-linear models for pollutants are equivalent
+- There is no evidence of non-linear relationships (thresholds, saturation)
+- m_poll_linear is simpler, same performance  
+
+conclusions:
+- Temperature/seasonality explain most of the daily variability
+- Pollutants add small but potentially real effects
+- Pollutant effects could be stronger in population subgroups
+  
+  
+# Effect Visualization
+
+```{r effects-plots, fig.height=15}
+cat("\n========================================\n")
+cat("   CONDITIONAL EFFECT PLOTS\n")
+cat("========================================\n\n")
+
+p1 <- plot(conditional_effects(m_poll_linear, "mean.temp"), points = FALSE)[[1]] +
+  labs(title = "Temperature Effect",
+       y = "Predicted mortality",
+       x = "Mean temperature (°C)")
+
+p2 <- plot(conditional_effects(m_poll_linear, "log_TSP"), points = FALSE)[[1]] +
+  labs(title = "TSP Effect",
+       y = "Predicted mortality",
+       x = "log(TSP)")
+
+p3 <- plot(conditional_effects(m_poll_linear, "log_SO2"), points = FALSE)[[1]] +
+  labs(title = "SO₂ Effect",
+       y = "Predicted mortality",
+       x = "log(SO₂)")
+
+```
+
+
+# Saving
+
+```{r save-results}
+save(list = c("m0", "m0_nb", "m_temp", "m_poll_linear", "m_full",
+              "loo_m0", "loo_m0_nb", "loo_m_temp", "loo_m_poll_linear", "loo_m_full"),
+     file = "bayes_mortality_models_complete.RData")
+
+cat("\nModels saved in: bayes_mortality_models_complete.RData\n")
+```
+
+
+## Conclusion
+
+The Bayesian analysis of daily mortality and air pollution data in Milan during the period **1980–1990** shows that **temperature and seasonality explain the main share of mortality variability**, while air pollutants (in particular **SO₂ and TSP**) present **additional effects of reduced magnitude**.
+
+The negative binomial model is preferable to the simple Poisson, and the inclusion of temperature substantially improves predictive capacity. The addition of pollutants provides a more contained improvement, suggesting the presence of a real but difficult to estimate precisely signal.
+
+
+---
+
+## further analyses:
+
+* **Introduction of temporal lags of pollutants** to capture effects distributed over time
+* **Explicit management of residual autocorrelation** 
+* **In-depth verification and cleaning of historical data**
+* **Inclusion of seasonal epidemiological proxies** (e.g. influenza) if available
+
+These steps would allow making the estimates more robust and improving the epidemiological interpretation of the results without drastically changing the current framework.
+
